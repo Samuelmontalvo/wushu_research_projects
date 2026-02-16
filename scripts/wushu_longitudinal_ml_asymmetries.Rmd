@@ -392,7 +392,7 @@ p_ts_asymmetry <- ggplot(plot_df_ts, aes(x = week, y = asymmetry_value, color = 
 print(p_ts_asymmetry)
 
 # Save the plot for publication
-ggsave(filename = "figure_asymmetry_timeseries_300dpi.tiff", # Choose filename and format (.tiff, .png, .pdf, .jpeg)
+ggsave(filename = file.path("..", "figures", "figure_asymmetry_timeseries_300dpi.tiff"), # Choose filename and format (.tiff, .png, .pdf, .jpeg)
        plot = p_ts_asymmetry,                               # The plot object to save
        width = 8,                                          # Adjust width as needed
        height = 6,                                         # Adjust height as needed
@@ -449,7 +449,7 @@ p_scatter_asymmetry <- ggplot(plot_df_scatter, aes(x = asymmetry_value, y = jump
 print(p_scatter_asymmetry)
 
 # Save the plot for publication
-ggsave(filename = "figure_asymmetry_vs_jumpheight_300dpi.tiff", # Choose filename and format
+ggsave(filename = file.path("..", "figures", "figure_asymmetry_vs_jumpheight_300dpi.tiff"), # Choose filename and format
        plot = p_scatter_asymmetry,                             # The plot object to save
        width = 8,                                              # Adjust width as needed
        height = 6,                                             # Adjust height as needed
@@ -575,7 +575,7 @@ tryCatch({
          print(plot_interaction_avgf)
 
          # Save the interaction plot
-         ggsave(filename = "figure_lmm_interaction_avgf_300dpi.tiff",
+         ggsave(filename = file.path("..", "figures", "figure_lmm_interaction_avgf_300dpi.tiff"),
                 plot = plot_interaction_avgf,
                 width = 8, height = 5, units = "in", dpi = 300)
          print("Interaction plot saved.")
@@ -680,7 +680,7 @@ tryCatch({
                 x = "Week of Training", y = "Predicted Jump Height (cm)") +
            theme_minimal()
          print(plot_interaction_peakf)
-         ggsave(filename = "figure_lmm_interaction_peakf_300dpi.tiff",
+         ggsave(filename = file.path("..", "figures", "figure_lmm_interaction_peakf_300dpi.tiff"),
                 plot = plot_interaction_peakf,
                 width = 8, height = 5, units = "in", dpi = 300)
          print("Interaction plot saved.")
@@ -783,7 +783,7 @@ tryCatch({
                 x = "Week of Training", y = "Predicted Jump Height (cm)") +
            theme_minimal()
          print(plot_interaction_imp)
-         ggsave(filename = "figure_lmm_interaction_impulse_300dpi.tiff",
+         ggsave(filename = file.path("..", "figures", "figure_lmm_interaction_impulse_300dpi.tiff"),
                 plot = plot_interaction_imp,
                 width = 8, height = 5, units = "in", dpi = 300)
          print("Interaction plot saved.")
@@ -1034,7 +1034,7 @@ tryCatch({
 
   print(p_importance_ggplot)
 
-  ggsave(filename = "figure_xgb_importance_300dpi.tiff",
+  ggsave(filename = file.path("..", "figures", "figure_xgb_importance_300dpi.tiff"),
          plot = p_importance_ggplot,
          width = 7, height = 5, units = "in", dpi = 300)
   print("Feature importance plot saved using ggplot.")
@@ -1135,7 +1135,7 @@ p_pred_thresholds <- ggplot(results_df, aes(x = Index3_AvgF, y = predicted_jump_
 print(p_pred_thresholds)
 
 # Save the prediction plot
-ggsave(filename = "figure_xgb_predictions_thresholds_300dpi.tiff",
+ggsave(filename = file.path("..", "figures", "figure_xgb_predictions_thresholds_300dpi.tiff"),
        plot = p_pred_thresholds,
        width = 7, height = 5, units = "in", dpi = 300)
 print("Prediction plot saved.")
