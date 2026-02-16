@@ -1,0 +1,1148 @@
+---
+title: "ML_asymetries"
+author: "Pablo Tadeo. PhD, Samuel Montalvo. PhD, D*"
+date: "2025-05-03"
+output: html_document
+---
+
+# Load Librery
+
+```{r load-libraries, include=FALSE} # Uncomment triple backticks for use in Rmd}
+# --- Load Essential Libraries ---
+
+# 1. Data Reading & Manipulation
+library(tidyverse)  # Essential collection (dplyr, ggplot2, readr, etc.)
+library(lubridate)  # To easily work with dates
+library(janitor)    # To clean column names and tables
+library(readxl)     # To read Excel files (if needed for demographics)
+
+# 2. Linear Mixed-Effects Models (LMM)
+library(lme4)       # Main package for LMM
+library(lmerTest)   # To get p-values for LMM (extends lme4)
+
+# 3. Machine Learning (XGBoost)
+library(xgboost)    # XGBoost algorithm
+library(caret)      # Framework for ML model training, CV, and tuning
+
+# 4. Model Evaluation & Visualization
+# Ensure 'cv' package is installed first by running install.packages("cv") in the R console
+library(cv)         # For LMM-specific Cross-Validation (as requested)
+library(sjPlot)     # To create elegant tables and plots for LMM/GLM models
+library(gtsummary)  # To create publication-ready descriptive and model summary tables
+library(ggeffects)  # To compute and visualize marginal effects/predictions from models
+
+# 5. Additional Visualization Utilities (Optional/Preferential)
+library(ggprism)    # Prism-style themes for ggplot (used in original script)
+library(ggpubr)     # ggplot utilities, including ggarrange to combine plots
+
+# --- Commented Libraries (Consider if needed later) ---
+# library(table1)     # Alternative for descriptive tables (used in original script)
+# library(easystats)  # Suite of packages for statistical analysis (load specific packages if needed)
+# library(gridExtra)  # Alternative to ggpubr::ggarrange
+
+# Confirmation message (optional)
+print("Libraries loaded successfully.")
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## Load Data
+
+```{r}
+source(file.path("..", "R", "load_data.R"))
+
+longitudinal_data <- load_wushu_longitudinal(
+  dataset = "all",
+  data_dir = file.path("..", "data")
+)
+
+df_jump <- longitudinal_data$jumps
+df_demo <- longitudinal_data$demographics
+
+```
+
+
+```{r}
+# ```{r load-data} # Uncomment triple backticks for use in Rmd
+# --- Load Raw Data Files ---
+
+# Define file paths (adjust if files are in a subfolder, e.g., "data/")
+#jumps_file <- "Wushu_Malaysia_1yr_Jumps.csv"
+#demographics_file <- "Demographics.csv" # Assuming CSV, adjust if it's Excel
+
+# Load the jumps data
+#jumps_raw_df <- read_csv(jumps_file)
+
+# Load the demographics data
+# Use read_csv for CSV or read_excel from readxl package for Excel files
+#demographics_raw_df <- read_csv(demographics_file)
+# If it's an Excel file, use:
+# demographics_raw_df <- read_excel(demographics_file)
+
+# Display structure of loaded data (optional check)
+# print("Jumps data structure:")
+# str(jumps_raw_df)
+# print("Demographics data structure:")
+# str(demographics_raw_df)
+
+# Confirmation message (optional)
+#print("Raw data loaded.")
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## Pre-process data
+
+```{r preprocess-data} # Uncomment triple backticks for use in Rmd}
+# --- Initial Data Cleaning and Preprocessing ---
+
+# 1. Clean Column Names
+# Using janitor::clean_names on both raw dataframes
+jumps_df <- janitor::clean_names(df_jump)
+demographics_df <- janitor::clean_names(df_demo)
+
+# Remove potentially empty columns from jumps data (as in PDF source 1)
+jumps_df <- jumps_df %>% select_if(~!all(is.na(.)))
+# Remove TestId if it exists (as in PDF source 1)
+if ("test_id" %in% names(jumps_df)) {
+  jumps_df <- jumps_df %>% select(-test_id)
+}
+
+# 2. Prepare Demographics and Join DataFrames
+# Rename demographics columns to match jumps data for joining (as in PDF source 3)
+# !! Adjust original names if they differ in your 'Demographics.csv' !!
+demographics_df <- demographics_df %>%
+  rename(name = athlete, # Adjust 'athlete' if original name is different
+         dob = date_of_birth_dd_mm_yy) %>% # Adjust 'date_of_birth_dd_mm_yy' if original name is different
+  select(name, dob, sex, height) # Select relevant columns
+
+# Convert DOB to Date format (using dmy as in PDF source 3)
+# Ensure the original format IS day/month/year for dmy()
+demographics_df$dob <- dmy(demographics_df$dob)
+
+# Join jumps data with demographics data using 'name'
+# Ensure 'name' column exists and matches in both files after cleaning/renaming
+df <- inner_join(jumps_df, demographics_df, by = "name")
+
+# 3. Handle Dates in Main DataFrame
+# Convert jump date to Date format (using dmy as in PDF source 1)
+# Ensure the original format IS day/month/year for dmy()
+df$date <- dmy(df$date)
+# Remove rows with NA dates (important after conversion)
+df <- df %>% filter(!is.na(date))
+
+# 4. Calculate Age at Time of Jump
+# Calculate age, handling potential NA values in DOB (as in PDF source 4)
+df <- df %>%
+  mutate(age = if_else(!is.na(dob),
+                       as.numeric(interval(dob, date) / years(1)),
+                       NA_real_))
+
+# 5. Filter Jumps Data
+# Filter for Countermovement Jumps (as in PDF source 5)
+# Verify 'type' column exists and has "Countermovement Jump" value
+df <- df %>%
+  filter(type == "Countermovement Jump")
+
+# Handle 'tags' column filtering (allow NA, empty string, or 'Pre') (as in PDF source 5)
+if ("tags" %in% names(df)) {
+  df <- df %>%
+    filter(is.na(tags) | tags == "" | tags == 'Pre')
+} else {
+  # Optional: Add a message if the tags column is missing
+  print("Note: 'tags' column not found, skipping tag filtering.")
+}
+
+# 6. Calculate Derived Variables
+# Calculate mass and jump height in cm (as in PDF source 5)
+# Verify 'system_weight' and 'jump_height' columns exist
+df <- df %>%
+  mutate(mass = system_weight / 9.81,
+         jump_height_cm = jump_height * 100)
+
+# 7. Create Week Variable (Relative to Start Date)
+# Calculate week number relative to the first date in the dataset (alternative to isoweek)
+if (nrow(df) > 0 && "date" %in% names(df)) {
+  start_date <- min(df$date, na.rm = TRUE)
+  df <- df %>%
+    mutate(week = as.numeric(date - start_date) %/% 7 + 1) # Integer division for week number
+} else {
+  df$week <- NA # Assign NA if df is empty or date column is missing
+}
+
+
+# 8. Create Session ID
+# Create a unique ID for each testing session (athlete + date) (as in PDF source 1)
+if (nrow(df) > 0 && all(c("name", "date") %in% names(df))) {
+df <- df %>%
+  mutate(session_id = interaction(name, date, drop = TRUE, lex.order = TRUE))
+} else {
+  df$session_id <- NA
+}
+
+# 9. Ensure Numeric Types for Force Variables (Add more if needed)
+# Convert key force/jump variables to numeric (as in PDF source 1)
+# Add all relevant force/impulse columns here later when calculated
+force_cols_to_numeric <- c("left_avg_propulsive_force", "right_avg_propulsive_force",
+                           "left_force_at_peak_propulsive_force", "right_force_at_peak_propulsive_force",
+                           "system_weight", "jump_height", "countermovement_depth", "height", "m_rsi") # Added more from PDF context
+for(col in force_cols_to_numeric) {
+  if(col %in% names(df)) {
+    # Check if conversion is needed (e.g., if it's character)
+    if(!is.numeric(df[[col]])) {
+      df[[col]] <- as.numeric(df[[col]])
+      # Optional: Check for NAs introduced by coercion
+      # if(any(is.na(df[[col]][!is.na(jumps_df[[col]])]))) { # Check only where original wasn't NA
+      #  warning(paste("NAs introduced by converting column:", col))
+      # }
+    }
+  } else {
+    print(paste("Note: Column", col, "not found for numeric conversion."))
+  }
+}
+
+
+# Display structure and first few rows of the processed dataframe
+print("Structure of processed dataframe (df):")
+str(df)
+print("First few rows of processed dataframe (df):")
+head(df)
+
+# Confirmation message
+print("Initial data cleaning and preprocessing completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+### Correct-data-types
+
+```{r correct-data-types} # Uncomment triple backticks for use in Rmd}
+# --- Correct Incorrect Data Types (Character to Numeric) ---
+
+# Identify columns that are character but likely should be numeric
+# Based on the str() output, many columns need conversion.
+# List known problematic columns explicitly or identify programmatically if possible.
+# Example list based on previous str() output:
+cols_to_convert <- c(
+  "relative_force_at_min_displacement", "avg_braking_force",
+  "avg_relative_braking_force", "unweighting_phase", "unweighting_phase_percent",
+  "braking_phase_percent", "propulsive_phase_percent", "flight_time",
+  "braking_net_impulse", "propulsive_net_impulse", "peak_braking_velocity",
+  "l_r_peak_braking_force", "left_force_at_peak_braking_force",
+  "right_force_at_peak_braking_force", "l_r_avg_braking_force",
+  "left_avg_braking_force", "right_avg_braking_force", "l_r_peak_propulsive_force",
+  "l_r_avg_propulsive_force", "l_r_avg_braking_rfd", "left_avg_braking_rfd",
+  "right_avg_braking_rfd", "l_r_braking_impulse_index", "l_r_propulsive_impulse_index",
+  "time_to_stabilization", "l_r_peak_landing_force", "left_force_at_peak_landing_force",
+  "right_force_at_peak_landing_force", "l_r_avg_landing_force",
+  "left_avg_landing_force", "right_avg_landing_force", "l_r_landing_impulse_index"
+  # Add any other character columns that should be numeric
+)
+
+# Function to safely convert to numeric, handling "N/A"
+safe_as_numeric <- function(x) {
+  # Replace character "N/A" with standard NA before conversion
+  x_cleaned <- if_else(as.character(x) == "N/A", NA_character_, as.character(x))
+  # Attempt conversion
+  as.numeric(x_cleaned)
+}
+
+# Apply the conversion function across the identified columns
+# Check if columns exist before trying to convert
+existing_cols_to_convert <- intersect(cols_to_convert, names(df))
+
+if(length(existing_cols_to_convert) > 0) {
+  df <- df %>%
+    mutate(across(all_of(existing_cols_to_convert), safe_as_numeric))
+  print(paste("Attempted numeric conversion for:", length(existing_cols_to_convert), "columns."))
+} else {
+  print("No columns found matching the list for numeric conversion.")
+}
+
+
+# Check the structure again for some key converted columns
+print("Structure check for selected converted columns:")
+if(length(existing_cols_to_convert) > 0) {
+  df %>% select(all_of(existing_cols_to_convert)) %>% str()
+}
+
+# Check specifically for impulse variables
+print("Structure check for key impulse variables:")
+df %>% select(contains("impulse")) %>% str()
+
+# Confirmation message
+print("Data type correction attempted.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## Calculate-asymmetry–indices
+
+```{r calculate-asymmetry-indices} # Uncomment triple backticks for use in Rmd}
+# --- Calculate Asymmetry Indices ---
+
+# Ensure necessary columns exist and are numeric before proceeding
+required_cols <- c("left_avg_propulsive_force", "right_avg_propulsive_force",
+                   "left_force_at_peak_propulsive_force", "right_force_at_peak_propulsive_force",
+                   "propulsive_phase") # Added propulsive_phase for impulse calc
+
+if (!all(required_cols %in% names(df))) {
+  stop("Error: One or more required columns for asymmetry calculation are missing.")
+}
+if (!all(sapply(df[required_cols], is.numeric))) {
+ stop("Error: One or more required columns for asymmetry calculation are not numeric.")
+}
+
+# 1. Asymmetry based on Average Propulsive Force (AvgF)
+df <- df %>%
+  mutate(
+    # Ensure non-negative values, add small epsilon if needed for division/log
+    L_AvgF = pmax(0, left_avg_propulsive_force),
+    R_AvgF = pmax(0, right_avg_propulsive_force),
+    # Calculate indices (handle potential division by zero or log(0))
+    Index1_AvgF = if_else(pmax(L_AvgF, R_AvgF) == 0, 0, abs(L_AvgF - R_AvgF) / pmax(L_AvgF, R_AvgF) * 100),
+    Index2_AvgF = if_else((L_AvgF + R_AvgF) == 0, 0, (L_AvgF - R_AvgF) / (L_AvgF + R_AvgF) * 100),
+    Index3_AvgF = if_else(R_AvgF == 0, NA_real_, (45 - atan(L_AvgF / R_AvgF) * (180 / pi)) / 90 * 100), # Using L/R ratio based on formula source 13 arctan(B/A) where A=R, B=L? Check original formula's A & B assignment. Assuming atan(Left/Right) here. Adjust if needed.
+    Index4_AvgF = if_else(L_AvgF <= 0 | R_AvgF <= 0, NA_real_, log(L_AvgF / R_AvgF) * 100) # Ensure positive values for log
+  )
+
+# 2. Asymmetry based on Force at Peak Propulsive Force (PeakF)
+# (Assuming 'left/right_force_at_peak_propulsive_force' are the correct L/R values at the time of overall peak propulsive force)
+df <- df %>%
+  mutate(
+    L_PeakF = pmax(0, left_force_at_peak_propulsive_force),
+    R_PeakF = pmax(0, right_force_at_peak_propulsive_force),
+    # Calculate indices
+    Index1_PeakF = if_else(pmax(L_PeakF, R_PeakF) == 0, 0, abs(L_PeakF - R_PeakF) / pmax(L_PeakF, R_PeakF) * 100),
+    Index2_PeakF = if_else((L_PeakF + R_PeakF) == 0, 0, (L_PeakF - R_PeakF) / (L_PeakF + R_PeakF) * 100),
+    Index3_PeakF = if_else(R_PeakF == 0, NA_real_, (45 - atan(L_PeakF / R_PeakF) * (180 / pi)) / 90 * 100), # Assuming atan(Left/Right)
+    Index4_PeakF = if_else(L_PeakF <= 0 | R_PeakF <= 0, NA_real_, log(L_PeakF / R_PeakF) * 100)
+  )
+
+# 3. Estimate Left/Right Propulsive Impulse (Imp)
+df <- df %>%
+  mutate(
+    # Check for NA or non-positive duration
+    propulsive_phase_cleaned = if_else(is.na(propulsive_phase) | propulsive_phase <= 0, NA_real_, propulsive_phase),
+    # Estimate Impulse = Avg Force * Duration
+    left_impulse_est = L_AvgF * propulsive_phase_cleaned,
+    right_impulse_est = R_AvgF * propulsive_phase_cleaned
+  )
+
+# 4. Asymmetry based on Estimated Propulsive Impulse (Imp)
+df <- df %>%
+  mutate(
+    L_Imp = pmax(0, left_impulse_est),
+    R_Imp = pmax(0, right_impulse_est),
+    # Calculate indices
+    Index1_Imp = if_else(pmax(L_Imp, R_Imp) == 0 | is.na(L_Imp) | is.na(R_Imp), 0, abs(L_Imp - R_Imp) / pmax(L_Imp, R_Imp) * 100),
+    Index2_Imp = if_else((L_Imp + R_Imp) == 0 | is.na(L_Imp) | is.na(R_Imp), 0, (L_Imp - R_Imp) / (L_Imp + R_Imp) * 100),
+    Index3_Imp = if_else(R_Imp == 0 | is.na(L_Imp) | is.na(R_Imp), NA_real_, (45 - atan(L_Imp / R_Imp) * (180 / pi)) / 90 * 100), # Assuming atan(Left/Right)
+    Index4_Imp = if_else(L_Imp <= 0 | R_Imp <= 0 | is.na(L_Imp) | is.na(R_Imp), NA_real_, log(L_Imp / R_Imp) * 100)
+  )
+
+# Display structure check for newly created asymmetry columns
+print("Structure check for newly calculated Asymmetry Indices:")
+df %>% select(starts_with("Index1_"), starts_with("Index2_"), starts_with("Index3_"), starts_with("Index4_")) %>% str()
+
+# Display structure check for estimated impulse columns
+print("Structure check for estimated Impulse columns:")
+df %>% select(ends_with("_impulse_est")) %>% str()
+
+# Confirmation message
+print("Asymmetry indices calculated for Avg Force, Peak Force, and Estimated Impulse.")
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+# 1. EDA-asymmetry-time series
+
+```{r eda-asymmetry-timeseries, fig.width=10, fig.height=8} # Uncomment triple backticks for use in Rmd}
+# --- EDA: Plot Asymmetry Indices Over Time by Sex ---
+
+# Select key asymmetry indices to plot (e.g., Index2 for each type)
+plot_df_ts <- df %>%
+  select(week, sex, Index2_AvgF, Index2_PeakF, Index2_Imp) %>%
+  # Pivot longer for easier plotting with facet_wrap
+  pivot_longer(cols = starts_with("Index2_"),
+               names_to = "asymmetry_index_type",
+               values_to = "asymmetry_value") %>%
+  # Optional: Clean up the names for nicer plot labels
+  mutate(asymmetry_index_type = recode(asymmetry_index_type,
+                                       "Index2_AvgF" = "Avg Force Asymmetry (Index 2)",
+                                       "Index2_PeakF" = "Peak Force Asymmetry (Index 2)",
+                                       "Index2_Imp" = "Est. Impulse Asymmetry (Index 2)"))
+
+# Create the plot
+p_ts_asymmetry <- ggplot(plot_df_ts, aes(x = week, y = asymmetry_value, color = sex)) +
+  # geom_point(alpha = 0.1) + # Add points if desired, can be noisy
+  geom_smooth(method = "loess", aes(fill = sex), alpha = 0.2, se = TRUE) + # LOESS smoothing with CI
+  facet_wrap(~asymmetry_index_type, ncol = 1, scales = "free_y") + # Separate plot for each index type
+  labs(
+    title = "Time Series of Different Asymmetry Indices by Sex",
+    x = "Week of Training",
+    y = "Asymmetry Index Value (%)",
+    color = "Sex",
+    fill = "Sex"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 10), # Adjust facet title size
+        legend.position = "top") +
+  scale_color_brewer(palette = "Set1") + # Color scheme
+  scale_fill_brewer(palette = "Set1")
+
+# Print the plot to the R Markdown output
+print(p_ts_asymmetry)
+
+# Save the plot for publication
+ggsave(filename = "figure_asymmetry_timeseries_300dpi.tiff", # Choose filename and format (.tiff, .png, .pdf, .jpeg)
+       plot = p_ts_asymmetry,                               # The plot object to save
+       width = 8,                                          # Adjust width as needed
+       height = 6,                                         # Adjust height as needed
+       units = "in",                                       # Units for width/height ("in", "cm", "mm")
+       dpi = 300)                                          # Resolution in Dots Per Inch
+
+# Confirmation message
+print("Time series plots for asymmetry indices generated and saved.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## EDA-asymmetry vs. jump height  
+
+```{r eda-asymmetry-vs-jumpheight, fig.width=10, fig.height=8} # Uncomment triple backticks for use in Rmd}
+# --- EDA: Plot Asymmetry Indices vs. Jump Height by Sex ---
+
+# Select relevant columns for plotting
+plot_df_scatter <- df %>%
+  select(jump_height_cm, sex, Index2_AvgF, Index2_PeakF, Index2_Imp) %>%
+  # Pivot longer for easier plotting with facet_wrap
+  pivot_longer(cols = starts_with("Index2_"),
+               names_to = "asymmetry_index_type",
+               values_to = "asymmetry_value") %>%
+  # Optional: Clean up the names for nicer plot labels
+  mutate(asymmetry_index_type = recode(asymmetry_index_type,
+                                       "Index2_AvgF" = "Avg Force Asymmetry (Index 2)",
+                                       "Index2_PeakF" = "Peak Force Asymmetry (Index 2)",
+                                       "Index2_Imp" = "Est. Impulse Asymmetry (Index 2)")) %>%
+  # Remove rows where asymmetry value might be NA (important for geom_smooth)
+  filter(!is.na(asymmetry_value))
+
+# Create the scatter plot with smoothers
+p_scatter_asymmetry <- ggplot(plot_df_scatter, aes(x = asymmetry_value, y = jump_height_cm, color = sex)) +
+  geom_point(alpha = 0.3) + # Points with transparency to handle overlap
+  geom_smooth(method = "loess", aes(fill = sex), alpha = 0.2, se = TRUE) + # LOESS smoothing with CI by sex
+  # Optional: Use method="lm" for linear trend lines instead of LOESS
+  # geom_smooth(method = "lm", aes(fill = sex), alpha = 0.2, se = TRUE) +
+  facet_wrap(~asymmetry_index_type, ncol = 1, scales = "free_x") + # Separate plot for each index type, free x-axis
+  labs(
+    title = "Relationship between Asymmetry Indices and Jump Height by Sex",
+    x = "Asymmetry Index Value (%)",
+    y = "Jump Height (cm)",
+    color = "Sex",
+    fill = "Sex"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(size = 10), # Adjust facet title size
+        legend.position = "top") +
+  scale_color_brewer(palette = "Set1") + # Color scheme
+  scale_fill_brewer(palette = "Set1")
+
+# Print the plot to the R Markdown output
+print(p_scatter_asymmetry)
+
+# Save the plot for publication
+ggsave(filename = "figure_asymmetry_vs_jumpheight_300dpi.tiff", # Choose filename and format
+       plot = p_scatter_asymmetry,                             # The plot object to save
+       width = 8,                                              # Adjust width as needed
+       height = 6,                                             # Adjust height as needed
+       units = "in",                                           # Units for width/height
+       dpi = 300)                                              # Resolution
+
+# Confirmation message
+print("Scatter plots for asymmetry vs. jump height generated and saved.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+# 2. Linear Mixed Models
+
+## LMM-analysis-avgf
+
+```{r lmm-analysis-avgf} # Uncomment triple backticks for use in Rmd}
+# --- LMM Analysis for Avg Force Asymmetry (Index3_AvgF) ---
+# Addressing Objectives 1 & 2
+
+# 1. Define and Fit the LMM
+# Using Index3_AvgF as the representative asymmetry index for average force
+# Random effects: random intercept for athlete (name) and session (session_id)
+# Fixed effects: week * Index3_AvgF * sex interaction
+
+# Ensure no NA values in predictors or outcome for the model
+model_df_avgf <- df %>%
+  filter(!is.na(jump_height_cm) & !is.na(week) & !is.na(Index3_AvgF) & !is.na(sex) & !is.na(name) & !is.na(session_id))
+
+# Check if sufficient data remains
+if(nrow(model_df_avgf) < 50) { # Arbitrary threshold, adjust as needed
+  warning("Low number of observations after filtering NAs for LMM AvgF.")
+}
+
+print(paste("Fitting LMM with", nrow(model_df_avgf), "observations."))
+
+# Fit the model (suppressing convergence warnings initially if needed)
+# Consider scaling continuous predictors (week, Index3_AvgF) if ranges are very different or for convergence
+# Using optimizer from original PDF script
+lmm_avgf <- lmer(jump_height_cm ~ week * Index3_AvgF * sex +
+                   (1 | name) + (1 | session_id),
+                 data = model_df_avgf,
+                 control = lmerControl(optimizer ="bobyqa", optCtrl = list(maxfun = 2e5))) # Increased maxfun
+
+# 2. Display Model Summary
+print("--- LMM Summary (Avg Force Asymmetry: Index3_AvgF) ---")
+print(summary(lmm_avgf))
+
+# Create a publication-ready table (optional but recommended)
+# Use options like show.ci, show.se, show.p, p.style etc. as needed
+print("--- Formatted LMM Table (Avg Force Asymmetry: Index3_AvgF) ---")
+tryCatch({ # Use tryCatch in case tab_model fails for any reason
+  lmm_avgf_table <- sjPlot::tab_model(lmm_avgf,
+                                      p.style = "numeric_stars",
+                                      show.se = TRUE, # Show standard errors
+                                      show.stat = TRUE, # Show t-stats
+                                      dv.labels = "Vertical Jump Height (cm)",
+                                      string.pred = "Predictor",
+                                      string.est = "Estimate (β)",
+                                      string.se = "SE",
+                                      string.stat = "t-stat",
+                                      string.p = "p-value")
+  print(lmm_avgf_table) # Print the formatted table object
+}, error = function(e) {
+  print(paste("tab_model failed with error:", e$message))
+})
+
+
+# 3. Cross-Validation (LMM)
+# Apply 10-fold CV using the 'cv' package, clustering by athlete ('name')
+# Note: This can be computationally intensive
+print("--- LMM Cross-Validation (Avg Force Asymmetry: Index3_AvgF) ---")
+# Ensure the 'cv' package is loaded and model_df_avgf contains necessary variables including 'name'
+set.seed(123) # for reproducibility
+cv_lmm_avgf <- NULL # Initialize variable
+tryCatch({
+  cv_lmm_avgf <- cv::cv(model = lmm_avgf,
+                        data = model_df_avgf,
+                        cluster = "name", # Cluster by athlete
+                        k = 10,           # 10 folds
+                        seed = 123)
+
+  # Print the CV results (e.g., RMSE, R-squared if available)
+  print(cv_lmm_avgf)
+  if (!is.null(cv_lmm_avgf$RMSE)) {
+     print(paste("Cross-validated RMSE:", round(cv_lmm_avgf$RMSE, 3)))
+  }
+
+}, error = function(e) {
+  print(paste("LMM Cross-validation failed with error:", e$message))
+  print("Skipping LMM CV.")
+})
+
+
+# 4. Visualize Significant Interactions (Example: Triple Interaction)
+# Check summary(lmm_avgf) for significant interactions first
+# If week:Index3_AvgF:sex is significant, visualize it:
+print("--- LMM Interaction Plot (Avg Force Asymmetry: Index3_AvgF) ---")
+plot_interaction_avgf <- NULL # Initialize variable
+tryCatch({
+  coef_summary <- summary(lmm_avgf)$coefficients
+  # Construct the interaction term name carefully based on factor levels (e.g., 'sexMale')
+  # Find the row corresponding to the triple interaction involving week, Index3_AvgF, and sex
+  interaction_term_row <- grep("week:Index3_AvgF:sex.*", rownames(coef_summary)) # Use grep for flexibility
+
+  if (length(interaction_term_row) == 1) { # Check if term was found
+      interaction_term_name <- rownames(coef_summary)[interaction_term_row]
+      p_value_interaction <- coef_summary[interaction_term_row, "Pr(>|t|)"]
+
+      if (!is.na(p_value_interaction) && p_value_interaction < 0.05) { # Using p < 0.05 threshold
+         print(paste("Plotting significant interaction:", interaction_term_name, "(p=", round(p_value_interaction, 3), ")"))
+         # Use ggeffects::ggpredict
+         # Predict at mean +/- 1 SD of Index3_AvgF for clearer visualization
+         pred_interaction_avgf <- ggpredict(lmm_avgf, terms = c("week", "Index3_AvgF [meansd]", "sex"))
+
+         # Plot the predictions
+         plot_interaction_avgf <- plot(pred_interaction_avgf, facets = TRUE) +
+           labs(title = "Predicted Jump Height: Interaction Week * Index3_AvgF * Sex",
+                x = "Week of Training",
+                y = "Predicted Jump Height (cm)") +
+           theme_minimal()
+
+         print(plot_interaction_avgf)
+
+         # Save the interaction plot
+         ggsave(filename = "figure_lmm_interaction_avgf_300dpi.tiff",
+                plot = plot_interaction_avgf,
+                width = 8, height = 5, units = "in", dpi = 300)
+         print("Interaction plot saved.")
+
+      } else {
+         print(paste("Triple interaction (", interaction_term_name, ") not significant (p=", round(p_value_interaction, 3), "), skipping plot."))
+      }
+  } else {
+      print("Could not uniquely identify the week:Index3_AvgF:sex interaction term in the model summary. Skipping plot.")
+  }
+
+}, error = function(e) {
+  print(paste("Interaction plotting failed with error:", e$message))
+  print("Skipping interaction plot.")
+})
+
+
+# Confirmation message
+print("LMM analysis for Index3_AvgF completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## LMM-analysis-peakf
+
+```{r lmm-analysis-peakf} # Uncomment triple backticks for use in Rmd}
+# --- LMM Analysis for Peak Force Asymmetry (Index3_PeakF) ---
+# Replicating analysis with Peak Force asymmetry index
+
+# 1. Define and Fit the LMM
+# Using Index3_PeakF as the asymmetry index
+# Random effects structure remains the same
+# Fixed effects: week * Index3_PeakF * sex interaction
+
+# Ensure no NA values in predictors or outcome for the model
+model_df_peakf <- df %>%
+  filter(!is.na(jump_height_cm) & !is.na(week) & !is.na(Index3_PeakF) & !is.na(sex) & !is.na(name) & !is.na(session_id))
+
+# Check if sufficient data remains
+if(nrow(model_df_peakf) < 50) {
+  warning("Low number of observations after filtering NAs for LMM PeakF.")
+}
+
+print(paste("Fitting LMM with", nrow(model_df_peakf), "observations for Peak Force Asymmetry."))
+
+# Fit the model
+lmm_peakf <- lmer(jump_height_cm ~ week * Index3_PeakF * sex +
+                    (1 | name) + (1 | session_id),
+                  data = model_df_peakf,
+                  control = lmerControl(optimizer ="bobyqa", optCtrl = list(maxfun = 2e5)))
+
+# 2. Display Model Summary
+print("--- LMM Summary (Peak Force Asymmetry: Index3_PeakF) ---")
+print(summary(lmm_peakf))
+
+# Create a publication-ready table
+print("--- Formatted LMM Table (Peak Force Asymmetry: Index3_PeakF) ---")
+tryCatch({
+  lmm_peakf_table <- sjPlot::tab_model(lmm_peakf,
+                                       p.style = "numeric_stars", show.se = TRUE, show.stat = TRUE,
+                                       dv.labels = "Vertical Jump Height (cm)", string.pred = "Predictor",
+                                       string.est = "Estimate (β)", string.se = "SE",
+                                       string.stat = "t-stat", string.p = "p-value")
+  print(lmm_peakf_table)
+}, error = function(e) {
+  print(paste("tab_model failed with error:", e$message))
+})
+
+# 3. Cross-Validation (LMM)
+print("--- LMM Cross-Validation (Peak Force Asymmetry: Index3_PeakF) ---")
+set.seed(123) # for reproducibility
+cv_lmm_peakf <- NULL
+tryCatch({
+  cv_lmm_peakf <- cv::cv(model = lmm_peakf,
+                         data = model_df_peakf,
+                         cluster = "name", k = 10, seed = 123)
+  print(cv_lmm_peakf)
+  if (!is.null(cv_lmm_peakf$RMSE)) {
+     print(paste("Cross-validated RMSE:", round(cv_lmm_peakf$RMSE, 3)))
+  }
+}, error = function(e) {
+  print(paste("LMM Cross-validation failed with error:", e$message))
+  print("Skipping LMM CV.")
+})
+
+# 4. Visualize Significant Interactions (Check if week:Index3_PeakF:sex is significant)
+print("--- LMM Interaction Plot (Peak Force Asymmetry: Index3_PeakF) ---")
+plot_interaction_peakf <- NULL
+tryCatch({
+  coef_summary_peakf <- summary(lmm_peakf)$coefficients
+  interaction_term_row_peakf <- grep("week:Index3_PeakF:sex.*", rownames(coef_summary_peakf))
+
+  if (length(interaction_term_row_peakf) == 1) {
+      interaction_term_name_peakf <- rownames(coef_summary_peakf)[interaction_term_row_peakf]
+      p_value_interaction_peakf <- coef_summary_peakf[interaction_term_row_peakf, "Pr(>|t|)"]
+
+      if (!is.na(p_value_interaction_peakf) && p_value_interaction_peakf < 0.05) {
+         print(paste("Plotting significant interaction:", interaction_term_name_peakf, "(p=", round(p_value_interaction_peakf, 3), ")"))
+         pred_interaction_peakf <- ggpredict(lmm_peakf, terms = c("week", "Index3_PeakF [meansd]", "sex"))
+         plot_interaction_peakf <- plot(pred_interaction_peakf, facets = TRUE) +
+           labs(title = "Predicted Jump Height: Interaction Week * Index3_PeakF * Sex",
+                x = "Week of Training", y = "Predicted Jump Height (cm)") +
+           theme_minimal()
+         print(plot_interaction_peakf)
+         ggsave(filename = "figure_lmm_interaction_peakf_300dpi.tiff",
+                plot = plot_interaction_peakf,
+                width = 8, height = 5, units = "in", dpi = 300)
+         print("Interaction plot saved.")
+      } else {
+         print(paste("Triple interaction (", interaction_term_name_peakf, ") not significant (p=", round(p_value_interaction_peakf, 3), "), skipping plot."))
+      }
+  } else {
+      print("Could not uniquely identify the week:Index3_PeakF:sex interaction term in the model summary. Skipping plot.")
+  }
+}, error = function(e) {
+  print(paste("Interaction plotting failed with error:", e$message))
+  print("Skipping interaction plot.")
+})
+
+# Confirmation message
+print("LMM analysis for Index3_PeakF completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## LLM-analysis-impulse
+
+```{r lmm-analysis-impulse} # Uncomment triple backticks for use in Rmd}
+# --- LMM Analysis for Estimated Impulse Asymmetry (Index3_Imp) ---
+# Replicating analysis with Estimated Impulse asymmetry index
+
+# 1. Define and Fit the LMM
+# Using Index3_Imp as the asymmetry index
+# Random effects structure remains the same
+# Fixed effects: week * Index3_Imp * sex interaction
+
+# Ensure no NA values in predictors or outcome for the model
+# Note: Index3_Imp might have NAs if impulse estimation failed (e.g., NA in duration)
+model_df_imp <- df %>%
+  filter(!is.na(jump_height_cm) & !is.na(week) & !is.na(Index3_Imp) & !is.na(sex) & !is.na(name) & !is.na(session_id))
+
+# Check if sufficient data remains
+if(nrow(model_df_imp) < 50) {
+  warning("Low number of observations after filtering NAs for LMM Impulse.")
+}
+
+print(paste("Fitting LMM with", nrow(model_df_imp), "observations for Estimated Impulse Asymmetry."))
+
+# Fit the model
+lmm_imp <- lmer(jump_height_cm ~ week * Index3_Imp * sex +
+                  (1 | name) + (1 | session_id),
+                data = model_df_imp,
+                control = lmerControl(optimizer ="bobyqa", optCtrl = list(maxfun = 2e5)))
+
+# 2. Display Model Summary
+print("--- LMM Summary (Estimated Impulse Asymmetry: Index3_Imp) ---")
+print(summary(lmm_imp))
+
+# Create a publication-ready table
+print("--- Formatted LMM Table (Estimated Impulse Asymmetry: Index3_Imp) ---")
+tryCatch({
+  lmm_imp_table <- sjPlot::tab_model(lmm_imp,
+                                     p.style = "numeric_stars", show.se = TRUE, show.stat = TRUE,
+                                     dv.labels = "Vertical Jump Height (cm)", string.pred = "Predictor",
+                                     string.est = "Estimate (β)", string.se = "SE",
+                                     string.stat = "t-stat", string.p = "p-value")
+  print(lmm_imp_table)
+}, error = function(e) {
+  print(paste("tab_model failed with error:", e$message))
+})
+
+# 3. Cross-Validation (LMM)
+print("--- LMM Cross-Validation (Estimated Impulse Asymmetry: Index3_Imp) ---")
+set.seed(123) # for reproducibility
+cv_lmm_imp <- NULL
+tryCatch({
+  cv_lmm_imp <- cv::cv(model = lmm_imp,
+                       data = model_df_imp,
+                       cluster = "name", k = 10, seed = 123)
+  print(cv_lmm_imp)
+   if (!is.null(cv_lmm_imp$RMSE)) {
+     print(paste("Cross-validated RMSE:", round(cv_lmm_imp$RMSE, 3)))
+  }
+}, error = function(e) {
+  print(paste("LMM Cross-validation failed with error:", e$message))
+  print("Skipping LMM CV.")
+})
+
+# 4. Visualize Significant Interactions (Check if week:Index3_Imp:sex is significant)
+print("--- LMM Interaction Plot (Estimated Impulse Asymmetry: Index3_Imp) ---")
+plot_interaction_imp <- NULL
+tryCatch({
+  coef_summary_imp <- summary(lmm_imp)$coefficients
+  interaction_term_row_imp <- grep("week:Index3_Imp:sex.*", rownames(coef_summary_imp))
+
+  if (length(interaction_term_row_imp) == 1) {
+      interaction_term_name_imp <- rownames(coef_summary_imp)[interaction_term_row_imp]
+      p_value_interaction_imp <- coef_summary_imp[interaction_term_row_imp, "Pr(>|t|)"]
+
+      if (!is.na(p_value_interaction_imp) && p_value_interaction_imp < 0.05) {
+         print(paste("Plotting significant interaction:", interaction_term_name_imp, "(p=", round(p_value_interaction_imp, 3), ")"))
+         pred_interaction_imp <- ggpredict(lmm_imp, terms = c("week", "Index3_Imp [meansd]", "sex"))
+         plot_interaction_imp <- plot(pred_interaction_imp, facets = TRUE) +
+           labs(title = "Predicted Jump Height: Interaction Week * Index3_Imp * Sex",
+                x = "Week of Training", y = "Predicted Jump Height (cm)") +
+           theme_minimal()
+         print(plot_interaction_imp)
+         ggsave(filename = "figure_lmm_interaction_impulse_300dpi.tiff",
+                plot = plot_interaction_imp,
+                width = 8, height = 5, units = "in", dpi = 300)
+         print("Interaction plot saved.")
+      } else {
+         print(paste("Triple interaction (", interaction_term_name_imp, ") not significant (p=", round(p_value_interaction_imp, 3), "), skipping plot."))
+      }
+  } else {
+      print("Could not uniquely identify the week:Index3_Imp:sex interaction term in the model summary. Skipping plot.")
+  }
+}, error = function(e) {
+  print(paste("Interaction plotting failed with error:", e$message))
+  print("Skipping interaction plot.")
+})
+
+
+# Confirmation message
+print("LMM analysis for Index3_Imp completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+# 3. Machine Learning (XGBoost)
+
+## ML-dataprep-XGBoost
+
+```{r ml-dataprep-xgboost} # Uncomment triple backticks for use in Rmd}
+# --- Prepare Data for XGBoost Model ---
+# Objective 3: Predict vertical jump performance responses at different interlimb asymmetry thresholds
+
+# 1. Select Features (Predictors) and Target Variable
+# Target: jump_height_cm
+# Features: Consider variables that might influence jump height based on LMMs and domain knowledge
+# - Time: week
+# - Demographics: sex, age, mass, height (potentially)
+# - Asymmetry: Select the most relevant indices based on LMMs (e.g., Index3_AvgF)
+#             Alternatively, include multiple indices (AvgF, PeakF, Imp types)
+#             Let's start by including Index3_AvgF, Index3_PeakF, Index3_Imp
+# - Other potential predictors: countermovement_depth, time_to_takeoff (important based on reviewer!)
+
+# Define target variable name
+target_var <- "jump_height_cm"
+
+# Define feature names
+feature_names <- c("week", "sex", "age", "mass", "height",
+                   "Index3_AvgF", "Index3_PeakF", "Index3_Imp", # Key asymmetry indices
+                   "countermovement_depth", "time_to_takeoff") # Other relevant variables
+
+# Check if all selected features exist in the dataframe 'df'
+missing_features <- setdiff(feature_names, names(df))
+if(length(missing_features) > 0) {
+  stop(paste("Error: The following features selected for ML are missing from the dataframe:", paste(missing_features, collapse=", ")))
+}
+
+# Create the model dataframe, including the target, features, and the grouping variable ('name')
+ml_df <- df %>%
+  select(all_of(target_var), all_of(feature_names), name) %>%
+  # Remove rows with NA in target or any feature (XGBoost often requires complete cases)
+  filter(complete.cases(.))
+
+print(paste("Number of complete observations for ML:", nrow(ml_df)))
+if(nrow(ml_df) < 50) {
+  warning("Low number of complete observations for ML model.")
+}
+
+# 2. Prepare Data Matrix for XGBoost
+# Convert categorical features (sex) to numeric.
+# Option 1: Simple binary encoding (0/1) if only two levels
+ml_df <- ml_df %>%
+  mutate(sex_numeric = if_else(sex == "Male", 1, 0)) # Assuming Female is reference (0)
+
+# Option 2: One-hot encoding (using caret::dummyVars or model.matrix) - more general
+# dummy_encoder <- dummyVars(~ sex, data = ml_df, fullRank = TRUE) # fullRank=TRUE avoids multicollinearity
+# sex_encoded <- predict(dummy_encoder, newdata = ml_df)
+# ml_df <- cbind(ml_df %>% select(-sex), sex_encoded)
+
+
+# Create the feature matrix (excluding original 'sex' and grouping 'name')
+features_for_matrix <- setdiff(names(ml_df), c(target_var, "name", "sex")) # Remove original sex, keep numeric version
+xgb_feature_matrix <- as.matrix(ml_df[, features_for_matrix])
+
+# Create the target vector
+xgb_target_vector <- ml_df[[target_var]]
+
+# Store athlete names for grouped cross-validation
+xgb_groups <- ml_df$name
+
+# Check dimensions
+print("Dimensions of XGBoost feature matrix:")
+dim(xgb_feature_matrix)
+print("Length of XGBoost target vector:")
+length(xgb_target_vector)
+print("Length of grouping vector:")
+length(xgb_groups)
+
+
+# Confirmation message
+print("Data prepared for XGBoost.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## ML-CV-Tuning-XGBoost
+
+```{r ml-cv-tuning-xgboost} # Uncomment triple backticks for use in Rmd}
+# --- XGBoost: Cross-Validation and Hyperparameter Tuning (Parallel Enabled) ---
+
+# Ensure required variables exist
+# ... (previous checks) ...
+
+# Load parallel processing library
+library(doParallel)
+
+# 1. Set Seed for reproducibility
+set.seed(123)
+
+# 2. Define Cross-Validation Strategy (10-fold grouped by athlete)
+if(!is.factor(xgb_groups)) xgb_groups <- as.factor(xgb_groups)
+grouped_folds <- createFolds(y = xgb_groups, k = 10, list = TRUE, returnTrain = TRUE)
+
+train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  index = grouped_folds,
+  verboseIter = TRUE,
+  allowParallel = TRUE # Enable parallel processing
+)
+
+# 3. Define Hyperparameter Grid for Tuning
+tune_grid <- expand.grid(
+  nrounds = c(100, 200),
+  eta = c(0.05, 0.1),
+  max_depth = c(4, 6, 8),
+  gamma = c(0),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1),
+  subsample = c(0.8)
+)
+print("XGBoost Hyperparameter Grid:")
+print(tune_grid)
+
+# 4. Run Cross-Validated Training with Tuning using caret::train
+print("--- Starting XGBoost CV and Hyperparameter Tuning (Parallel Enabled)... ---")
+xgb_cv_model <- NULL
+training_start_time <- Sys.time()
+cl <- NULL # Initialize cluster variable
+tryCatch({
+  # --- Setup Parallel Backend ---
+  n_cores <- parallel::detectCores() - 1 # Leave one core free (adjust if needed)
+  if (n_cores < 1) n_cores <- 1 # Ensure at least 1 core
+  cl <- parallel::makeCluster(n_cores)
+  registerDoParallel(cl)
+  print(paste("Using", n_cores, "cores for parallel processing."))
+  # -----------------------------
+
+  xgb_cv_model <- train(
+    x = xgb_feature_matrix,
+    y = xgb_target_vector,
+    method = "xgbTree",
+    trControl = train_control,
+    tuneGrid = tune_grid,
+    metric = "RMSE",
+    verbosity = 0,
+    nthread = 1 # IMPORTANT: Use 1 thread within XGBoost when parallelizing folds with caret
+  )
+
+  training_end_time <- Sys.time()
+  print(paste("XGBoost training completed in:", round(difftime(training_end_time, training_start_time, units = "mins"), 2), "minutes"))
+
+}, error = function(e) {
+  training_end_time <- Sys.time()
+  print(paste("XGBoost training failed with error:", e$message))
+  print(paste("Failure occurred after:", round(difftime(training_end_time, training_start_time, units = "mins"), 2), "minutes"))
+}, finally = {
+  # --- Stop Parallel Backend ---
+  if (!is.null(cl)) {
+    parallel::stopCluster(cl)
+    print("Parallel backend stopped.")
+  }
+  registerDoSEQ() # Go back to sequential processing
+  # ---------------------------
+})
+
+# 5. Print Tuning Results
+# ... (same code as before to print results) ...
+if(!is.null(xgb_cv_model)) {
+  print("--- XGBoost CV Tuning Results ---")
+  print(xgb_cv_model)
+
+  print("--- Best Hyperparameters Found ---")
+  print(xgb_cv_model$bestTune)
+
+  print("--- Final Cross-Validated Performance (for best tune) ---")
+  best_tune_results <- xgb_cv_model$results[rownames(xgb_cv_model$bestTune), ]
+  print(paste("CV RMSE:", round(best_tune_results$RMSE, 3)))
+  print(paste("CV Rsquared:", round(best_tune_results$Rsquared, 3)))
+  print(paste("CV MAE:", round(best_tune_results$MAE, 3)))
+
+} else {
+  print("XGBoost model training was not successful, cannot show results.")
+}
+
+# Confirmation message
+print("XGBoost CV and hyperparameter tuning step completed (or failed).")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## ML-feature-importance-XGBoost
+
+```{r ml-feature-importance-xgboost, fig.width=8, fig.height=6} # Uncomment triple backticks for use in Rmd}
+# --- XGBoost: Feature Importance ---
+
+# Ensure the trained model object exists
+if (is.null(xgb_cv_model)) {
+  stop("Error: Trained XGBoost model object 'xgb_cv_model' not found. Please run the previous chunk successfully.")
+}
+
+# 1. Calculate Feature Importance
+# Use caret's varImp function for models trained with caret
+tryCatch({
+  xgb_importance <- varImp(xgb_cv_model, scale = FALSE) # Use scale=FALSE if you want raw importance scores
+
+  print("--- XGBoost Feature Importance Scores ---")
+  print(xgb_importance)
+
+  # 2. Plot Feature Importance
+  print("--- Plotting Feature Importance ---")
+  plot_importance <- plot(xgb_importance, main = "XGBoost Feature Importance")
+  print(plot_importance)
+
+  # Save the plot
+  # Use ggsave for ggplot objects if plot() returns one, otherwise save manually
+  # The plot object returned by plot.varImp.train might not be ggplot, need to check
+  # As an alternative, extract the importance data and plot with ggplot directly for saving
+  importance_data <- xgb_importance$importance %>%
+                      as.data.frame() %>%
+                      rownames_to_column(var = "Feature") %>%
+                      arrange(desc(Overall)) %>%
+                      mutate(Feature = factor(Feature, levels = rev(Feature))) # Order for plot
+
+  p_importance_ggplot <- ggplot(importance_data, aes(x = Feature, y = Overall)) +
+                          geom_bar(stat = "identity", fill = "skyblue") +
+                          coord_flip() + # Flip coordinates for horizontal bars
+                          labs(title = "XGBoost Feature Importance",
+                               x = "Feature",
+                               y = "Importance Score (Scaled)") + # caret scales by default
+                          theme_minimal()
+
+  print(p_importance_ggplot)
+
+  ggsave(filename = "figure_xgb_importance_300dpi.tiff",
+         plot = p_importance_ggplot,
+         width = 7, height = 5, units = "in", dpi = 300)
+  print("Feature importance plot saved using ggplot.")
+
+
+}, error = function(e){
+  print(paste("Failed to calculate or plot feature importance:", e$message))
+})
+
+# Confirmation message
+print("Feature importance analysis completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
+
+## ML-predict-thresholds
+
+```{r ml-predict-thresholds, fig.width=8, fig.height=4} # Uncomment triple backticks for use in Rmd}
+# --- XGBoost: Predict Jump Height at Specific Asymmetry Thresholds ---
+# Addressing Objective 3
+
+# Ensure the trained model object exists and the original data 'ml_df' used for training
+if (is.null(xgb_cv_model)) {
+  stop("Error: Trained XGBoost model object 'xgb_cv_model' not found.")
+}
+if (!exists("ml_df")) {
+  stop("Error: Dataframe 'ml_df' used for training not found.")
+}
+
+
+# 1. Define Asymmetry Thresholds to Test
+asymmetry_thresholds <- c(0, 5, 10, 15, 20) # e.g., 0% to 20% asymmetry for Index3_AvgF
+
+# 2. Create Hypothetical Data ('newdata')
+# We need representative profiles for Male and Female athletes.
+# Let's use the mean values for other continuous predictors from the training data (ml_df).
+# We also need to select a representative 'week' (e.g., midpoint of the study)
+
+# Calculate mean values for continuous predictors (excluding target, group, and factors)
+numeric_feature_names <- setdiff(features_for_matrix, c("sex_numeric")) # Get numeric feature names used in matrix
+mean_values <- ml_df %>%
+  select(all_of(numeric_feature_names)) %>%
+  summarise(across(everything(), ~mean(.x, na.rm = TRUE)))
+
+# Select a representative week (e.g., median or mean week)
+representative_week <- round(mean(ml_df$week, na.rm = TRUE)) # Or choose e.g., 40
+
+# Create newdata by expanding grid for sex and asymmetry thresholds
+newdata <- expand.grid(
+  sex_numeric = c(0, 1), # 0 = Female (reference), 1 = Male
+  Index3_AvgF = asymmetry_thresholds,
+  week = representative_week
+)
+
+# Add the mean values for other predictors
+# Ensure column order matches the training feature matrix!
+for (col in setdiff(numeric_feature_names, c("week", "Index3_AvgF"))) {
+  newdata[[col]] <- mean_values[[col]]
+}
+
+# Add other necessary asymmetry indices (PeakF, Imp) using their mean values for this prediction
+# We are varying ONLY Index3_AvgF, keeping others constant at their average
+if("Index3_PeakF" %in% names(mean_values)) newdata$Index3_PeakF <- mean_values$Index3_PeakF
+if("Index3_Imp" %in% names(mean_values)) newdata$Index3_Imp <- mean_values$Index3_Imp # Should be same as AvgF mean
+
+# Reorder columns to match the order in xgb_feature_matrix
+# features_for_matrix is the vector of column names used for the matrix in the previous chunk
+newdata <- newdata[, features_for_matrix, drop = FALSE]
+
+
+# 3. Make Predictions using the best tuned model from caret
+newdata_matrix <- as.matrix(newdata)
+predicted_jump_height <- predict(xgb_cv_model, newdata = newdata_matrix)
+
+# 4. Combine Predictions with Input Data for Plotting
+results_df <- cbind(newdata, predicted_jump_height) %>%
+  # Convert sex_numeric back to factor for plotting
+  mutate(Sex = factor(if_else(sex_numeric == 1, "Male", "Female")))
+
+print("--- Predicted Jump Heights at Asymmetry Thresholds ---")
+print(results_df %>% select(Sex, Index3_AvgF, predicted_jump_height) %>% arrange(Sex, Index3_AvgF))
+
+# 5. Visualize the Predictions
+print("--- Plotting Predicted Jump Height vs. Asymmetry Thresholds ---")
+p_pred_thresholds <- ggplot(results_df, aes(x = Index3_AvgF, y = predicted_jump_height, color = Sex, group = Sex)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  # Optional: Add error bars/ribbons based on model uncertainty if available (harder with caret/xgboost)
+  labs(
+    title = paste("XGBoost Predicted Jump Height vs. Index3_AvgF Asymmetry", "\n(at Week", representative_week, "with Mean Covariates)"),
+    x = "Index3_AvgF Asymmetry (%)",
+    y = "Predicted Jump Height (cm)",
+    color = "Sex"
+  ) +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1")
+
+print(p_pred_thresholds)
+
+# Save the prediction plot
+ggsave(filename = "figure_xgb_predictions_thresholds_300dpi.tiff",
+       plot = p_pred_thresholds,
+       width = 7, height = 5, units = "in", dpi = 300)
+print("Prediction plot saved.")
+
+
+# Confirmation message
+print("XGBoost prediction at asymmetry thresholds completed.")
+
+# ``` # Uncomment triple backticks for use in Rmd
+```
