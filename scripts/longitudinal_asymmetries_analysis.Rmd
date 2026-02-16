@@ -49,6 +49,7 @@ print("Libraries loaded successfully.")
 
 ```{r}
 source(file.path("..", "R", "load_data.R"))
+source(file.path("..", "R", "asymmetry_indices.R"))
 
 longitudinal_data <- load_wushu_longitudinal(
   dataset = "all",
@@ -276,80 +277,47 @@ print("Data type correction attempted.")
 
 ## Calculate-asymmetry–indices
 
-```{r calculate-asymmetry-indices} # Uncomment triple backticks for use in Rmd}
-# --- Calculate Asymmetry Indices ---
+```{r calculate-asymmetry-indices}
+# --- Calculate Asymmetry Indices using calc_asymmetry_indices() ---
 
-# Ensure necessary columns exist and are numeric before proceeding
 required_cols <- c("left_avg_propulsive_force", "right_avg_propulsive_force",
                    "left_force_at_peak_propulsive_force", "right_force_at_peak_propulsive_force",
-                   "propulsive_phase") # Added propulsive_phase for impulse calc
+                   "propulsive_phase")
 
 if (!all(required_cols %in% names(df))) {
-  stop("Error: One or more required columns for asymmetry calculation are missing.")
+  stop("Missing required columns for asymmetry calculation.")
 }
 if (!all(sapply(df[required_cols], is.numeric))) {
- stop("Error: One or more required columns for asymmetry calculation are not numeric.")
+  stop("Required columns for asymmetry calculation are not numeric.")
 }
 
-# 1. Asymmetry based on Average Propulsive Force (AvgF)
-df <- df %>%
-  mutate(
-    # Ensure non-negative values, add small epsilon if needed for division/log
-    L_AvgF = pmax(0, left_avg_propulsive_force),
-    R_AvgF = pmax(0, right_avg_propulsive_force),
-    # Calculate indices (handle potential division by zero or log(0))
-    Index1_AvgF = if_else(pmax(L_AvgF, R_AvgF) == 0, 0, abs(L_AvgF - R_AvgF) / pmax(L_AvgF, R_AvgF) * 100),
-    Index2_AvgF = if_else((L_AvgF + R_AvgF) == 0, 0, (L_AvgF - R_AvgF) / (L_AvgF + R_AvgF) * 100),
-    Index3_AvgF = if_else(R_AvgF == 0, NA_real_, (45 - atan(L_AvgF / R_AvgF) * (180 / pi)) / 90 * 100), # Using L/R ratio based on formula source 13 arctan(B/A) where A=R, B=L? Check original formula's A & B assignment. Assuming atan(Left/Right) here. Adjust if needed.
-    Index4_AvgF = if_else(L_AvgF <= 0 | R_AvgF <= 0, NA_real_, log(L_AvgF / R_AvgF) * 100) # Ensure positive values for log
-  )
+# 1. Average Propulsive Force
+df <- bind_cols(df, calc_asymmetry_indices(
+  left  = pmax(0, df$left_avg_propulsive_force),
+  right = pmax(0, df$right_avg_propulsive_force),
+  suffix = "AvgF"
+))
 
-# 2. Asymmetry based on Force at Peak Propulsive Force (PeakF)
-# (Assuming 'left/right_force_at_peak_propulsive_force' are the correct L/R values at the time of overall peak propulsive force)
-df <- df %>%
-  mutate(
-    L_PeakF = pmax(0, left_force_at_peak_propulsive_force),
-    R_PeakF = pmax(0, right_force_at_peak_propulsive_force),
-    # Calculate indices
-    Index1_PeakF = if_else(pmax(L_PeakF, R_PeakF) == 0, 0, abs(L_PeakF - R_PeakF) / pmax(L_PeakF, R_PeakF) * 100),
-    Index2_PeakF = if_else((L_PeakF + R_PeakF) == 0, 0, (L_PeakF - R_PeakF) / (L_PeakF + R_PeakF) * 100),
-    Index3_PeakF = if_else(R_PeakF == 0, NA_real_, (45 - atan(L_PeakF / R_PeakF) * (180 / pi)) / 90 * 100), # Assuming atan(Left/Right)
-    Index4_PeakF = if_else(L_PeakF <= 0 | R_PeakF <= 0, NA_real_, log(L_PeakF / R_PeakF) * 100)
-  )
+# 2. Force at Peak Propulsive Force
+df <- bind_cols(df, calc_asymmetry_indices(
+  left  = pmax(0, df$left_force_at_peak_propulsive_force),
+  right = pmax(0, df$right_force_at_peak_propulsive_force),
+  suffix = "PeakF"
+))
 
-# 3. Estimate Left/Right Propulsive Impulse (Imp)
-df <- df %>%
-  mutate(
-    # Check for NA or non-positive duration
-    propulsive_phase_cleaned = if_else(is.na(propulsive_phase) | propulsive_phase <= 0, NA_real_, propulsive_phase),
-    # Estimate Impulse = Avg Force * Duration
-    left_impulse_est = L_AvgF * propulsive_phase_cleaned,
-    right_impulse_est = R_AvgF * propulsive_phase_cleaned
-  )
+# 3. Estimated Propulsive Impulse (Avg Force * Duration)
+prop_phase <- if_else(is.na(df$propulsive_phase) | df$propulsive_phase <= 0,
+                      NA_real_, df$propulsive_phase)
+df$left_impulse_est  <- pmax(0, df$left_avg_propulsive_force) * prop_phase
+df$right_impulse_est <- pmax(0, df$right_avg_propulsive_force) * prop_phase
 
-# 4. Asymmetry based on Estimated Propulsive Impulse (Imp)
-df <- df %>%
-  mutate(
-    L_Imp = pmax(0, left_impulse_est),
-    R_Imp = pmax(0, right_impulse_est),
-    # Calculate indices
-    Index1_Imp = if_else(pmax(L_Imp, R_Imp) == 0 | is.na(L_Imp) | is.na(R_Imp), 0, abs(L_Imp - R_Imp) / pmax(L_Imp, R_Imp) * 100),
-    Index2_Imp = if_else((L_Imp + R_Imp) == 0 | is.na(L_Imp) | is.na(R_Imp), 0, (L_Imp - R_Imp) / (L_Imp + R_Imp) * 100),
-    Index3_Imp = if_else(R_Imp == 0 | is.na(L_Imp) | is.na(R_Imp), NA_real_, (45 - atan(L_Imp / R_Imp) * (180 / pi)) / 90 * 100), # Assuming atan(Left/Right)
-    Index4_Imp = if_else(L_Imp <= 0 | R_Imp <= 0 | is.na(L_Imp) | is.na(R_Imp), NA_real_, log(L_Imp / R_Imp) * 100)
-  )
+df <- bind_cols(df, calc_asymmetry_indices(
+  left  = df$left_impulse_est,
+  right = df$right_impulse_est,
+  suffix = "Imp"
+))
 
-# Display structure check for newly created asymmetry columns
-print("Structure check for newly calculated Asymmetry Indices:")
-df %>% select(starts_with("Index1_"), starts_with("Index2_"), starts_with("Index3_"), starts_with("Index4_")) %>% str()
-
-# Display structure check for estimated impulse columns
-print("Structure check for estimated Impulse columns:")
-df %>% select(ends_with("_impulse_est")) %>% str()
-
-# Confirmation message
-print("Asymmetry indices calculated for Avg Force, Peak Force, and Estimated Impulse.")
-# ``` # Uncomment triple backticks for use in Rmd
+str(df %>% select(starts_with("Index")))
 ```
 
 # 1. EDA-asymmetry-time series
