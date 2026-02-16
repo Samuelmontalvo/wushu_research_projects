@@ -19,6 +19,8 @@ library(readxl)     # To read Excel files (if needed for demographics)
 # 2. Linear Mixed-Effects Models (LMM)
 library(lme4)       # Main package for LMM
 library(lmerTest)   # To get p-values for LMM (extends lme4)
+library(nlme)       # For lme() with AR(1) correlation structures
+library(splines)    # For natural/B-spline basis functions in model formulas
 
 # 3. Machine Learning (XGBoost)
 library(xgboost)    # XGBoost algorithm
@@ -771,6 +773,223 @@ tryCatch({
 print("LMM analysis for Index3_Imp completed.")
 
 # ``` # Uncomment triple backticks for use in Rmd
+```
+
+# 2b. Alternative Mixed Models: Splines + AR(1)
+
+These models extend the standard LMMs above by:
+
+1. **Natural splines on `week`** — allowing non-linear temporal trends in jump height
+2. **AR(1) residual correlation** — accounting for temporal autocorrelation within each athlete
+
+We use `nlme::lme()` because `lme4::lmer()` does not support correlation structures directly.
+
+## Spline + AR(1) Models
+
+```{r spline-ar1-models, fig.width=12, fig.height=10}
+# --- Fit alternative LMMs with splines + AR(1) using nlme::lme() ---
+
+# Helper: choose spline df based on the range of weeks
+spline_df <- min(4, length(unique(model_df_avgf$week)) - 1)
+
+# ---- Model for Avg Force Asymmetry (Index3_AvgF) ----
+lme_spline_avgf <- nlme::lme(
+  fixed  = jump_height_cm ~ ns(week, df = spline_df) * Index3_AvgF * sex,
+  random = ~ 1 | name/session_id,
+  correlation = corAR1(form = ~ week | name),
+  data   = model_df_avgf,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+# ---- Model for Peak Force Asymmetry (Index3_PeakF) ----
+lme_spline_peakf <- nlme::lme(
+  fixed  = jump_height_cm ~ ns(week, df = spline_df) * Index3_PeakF * sex,
+  random = ~ 1 | name/session_id,
+  correlation = corAR1(form = ~ week | name),
+  data   = model_df_peakf,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+# ---- Model for Impulse Asymmetry (Index3_Imp) ----
+lme_spline_imp <- nlme::lme(
+  fixed  = jump_height_cm ~ ns(week, df = spline_df) * Index3_Imp * sex,
+  random = ~ 1 | name/session_id,
+  correlation = corAR1(form = ~ week | name),
+  data   = model_df_imp,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+cat("All three spline + AR(1) models fitted successfully.\n")
+cat("Estimated AR(1) phi for AvgF model:", coef(lme_spline_avgf$modelStruct$corStruct, unconstrained = FALSE), "\n")
+```
+
+## Spline + AR(1) Summaries
+
+```{r spline-ar1-summaries}
+cat("=== Spline + AR(1) Model: Avg Force Asymmetry ===\n")
+summary(lme_spline_avgf)
+
+cat("\n=== Spline + AR(1) Model: Peak Force Asymmetry ===\n")
+summary(lme_spline_peakf)
+
+cat("\n=== Spline + AR(1) Model: Impulse Asymmetry ===\n")
+summary(lme_spline_imp)
+```
+
+## Model Comparison: Linear LMM vs Spline + AR(1)
+
+```{r model-comparison-table}
+# --- Compare AIC / BIC across model pairs ---
+# Refit the linear LMMs with nlme::lme() so AIC/BIC are comparable (same likelihood method)
+
+lme_linear_avgf <- nlme::lme(
+  fixed  = jump_height_cm ~ week * Index3_AvgF * sex,
+  random = ~ 1 | name/session_id,
+  data   = model_df_avgf,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+lme_linear_peakf <- nlme::lme(
+  fixed  = jump_height_cm ~ week * Index3_PeakF * sex,
+  random = ~ 1 | name/session_id,
+  data   = model_df_peakf,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+lme_linear_imp <- nlme::lme(
+  fixed  = jump_height_cm ~ week * Index3_Imp * sex,
+  random = ~ 1 | name/session_id,
+  data   = model_df_imp,
+  control = lmeControl(opt = "optim", maxIter = 500, msMaxIter = 500)
+)
+
+# Build comparison table
+comparison_df <- tibble::tribble(
+  ~Model,                        ~AIC,                          ~BIC,                          ~logLik,
+  "Linear LMM (AvgF)",          AIC(lme_linear_avgf),          BIC(lme_linear_avgf),          as.numeric(logLik(lme_linear_avgf)),
+  "Spline+AR1 (AvgF)",          AIC(lme_spline_avgf),          BIC(lme_spline_avgf),          as.numeric(logLik(lme_spline_avgf)),
+  "Linear LMM (PeakF)",         AIC(lme_linear_peakf),         BIC(lme_linear_peakf),         as.numeric(logLik(lme_linear_peakf)),
+  "Spline+AR1 (PeakF)",         AIC(lme_spline_peakf),         BIC(lme_spline_peakf),         as.numeric(logLik(lme_spline_peakf)),
+  "Linear LMM (Impulse)",       AIC(lme_linear_imp),           BIC(lme_linear_imp),           as.numeric(logLik(lme_linear_imp)),
+  "Spline+AR1 (Impulse)",       AIC(lme_spline_imp),           BIC(lme_spline_imp),           as.numeric(logLik(lme_spline_imp))
+) %>%
+  mutate(across(where(is.numeric), ~round(.x, 1)))
+
+knitr::kable(comparison_df, caption = "Model Fit Comparison: Linear LMM vs Spline + AR(1)")
+```
+
+## Likelihood Ratio Tests
+
+```{r likelihood-ratio-tests}
+cat("=== LRT: AvgF — Linear vs Spline+AR1 ===\n")
+print(anova(lme_linear_avgf, lme_spline_avgf))
+
+cat("\n=== LRT: PeakF — Linear vs Spline+AR1 ===\n")
+print(anova(lme_linear_peakf, lme_spline_peakf))
+
+cat("\n=== LRT: Impulse — Linear vs Spline+AR1 ===\n")
+print(anova(lme_linear_imp, lme_spline_imp))
+```
+
+## Prediction Comparison Plots
+
+```{r prediction-comparison-plots, fig.width=14, fig.height=12}
+# --- Generate and compare predictions from both model types ---
+
+# Function to create a prediction grid for one asymmetry type
+make_pred_grid <- function(data, index_col) {
+  week_seq <- seq(min(data$week), max(data$week), length.out = 50)
+  idx_vals <- quantile(data[[index_col]], c(0.25, 0.5, 0.75), na.rm = TRUE)
+  sexes   <- unique(data$sex)
+
+  grid <- expand.grid(
+    week = week_seq,
+    idx  = idx_vals,
+    sex  = sexes,
+    stringsAsFactors = FALSE
+  )
+  names(grid)[names(grid) == "idx"] <- index_col
+  grid
+}
+
+# Function to add predictions from both models
+add_predictions <- function(grid, lme_lin, lme_spl, data, index_col) {
+  # Add session_id and name columns for predict (use first available levels)
+  grid$name       <- data$name[1]
+  grid$session_id <- data$session_id[1]
+
+  grid$pred_linear <- predict(lme_lin, newdata = grid, level = 0)  # population-level
+  grid$pred_spline <- predict(lme_spl, newdata = grid, level = 0)
+
+  grid$index_label <- paste0(index_col, " = ", round(grid[[index_col]], 1), "%")
+  grid
+}
+
+# --- AvgF ---
+grid_avgf <- make_pred_grid(model_df_avgf, "Index3_AvgF")
+grid_avgf <- add_predictions(grid_avgf, lme_linear_avgf, lme_spline_avgf,
+                              model_df_avgf, "Index3_AvgF")
+
+# --- PeakF ---
+grid_peakf <- make_pred_grid(model_df_peakf, "Index3_PeakF")
+grid_peakf <- add_predictions(grid_peakf, lme_linear_peakf, lme_spline_peakf,
+                               model_df_peakf, "Index3_PeakF")
+
+# --- Impulse ---
+grid_imp <- make_pred_grid(model_df_imp, "Index3_Imp")
+grid_imp <- add_predictions(grid_imp, lme_linear_imp, lme_spline_imp,
+                             model_df_imp, "Index3_Imp")
+
+# --- Helper to plot one comparison ---
+plot_comparison <- function(grid, title_label) {
+  grid_long <- grid %>%
+    pivot_longer(cols = c(pred_linear, pred_spline),
+                 names_to = "Model", values_to = "Predicted") %>%
+    mutate(Model = recode(Model,
+                          "pred_linear" = "Linear LMM",
+                          "pred_spline" = "Spline + AR(1)"))
+
+  ggplot(grid_long, aes(x = week, y = Predicted, color = Model, linetype = Model)) +
+    geom_line(linewidth = 1) +
+    facet_grid(sex ~ index_label) +
+    labs(title = paste("Predicted Jump Height:", title_label),
+         x = "Week", y = "Predicted Jump Height (cm)") +
+    scale_color_manual(values = c("Linear LMM" = "#E41A1C", "Spline + AR(1)" = "#377EB8")) +
+    theme_minimal() +
+    theme(legend.position = "top",
+          strip.text = element_text(size = 9))
+}
+
+p_cmp_avgf  <- plot_comparison(grid_avgf,  "Avg Force Asymmetry (Index3_AvgF)")
+p_cmp_peakf <- plot_comparison(grid_peakf, "Peak Force Asymmetry (Index3_PeakF)")
+p_cmp_imp   <- plot_comparison(grid_imp,   "Impulse Asymmetry (Index3_Imp)")
+
+print(p_cmp_avgf)
+print(p_cmp_peakf)
+print(p_cmp_imp)
+
+# Save combined panel
+p_combined <- ggpubr::ggarrange(p_cmp_avgf, p_cmp_peakf, p_cmp_imp,
+                                 ncol = 1, nrow = 3, common.legend = TRUE, legend = "top")
+ggsave(filename = file.path("..", "figures", "figure_lmm_vs_spline_ar1_predictions_300dpi.tiff"),
+       plot = p_combined, width = 14, height = 14, units = "in", dpi = 300)
+
+cat("Prediction comparison plots generated and saved.\n")
+```
+
+## Residual Autocorrelation Check
+
+```{r residual-acf-check, fig.width=10, fig.height=4}
+# --- Compare residual ACF: linear vs spline+AR1 for AvgF model ---
+par(mfrow = c(1, 2))
+acf(residuals(lme_linear_avgf, type = "normalized"),
+    main = "ACF: Linear LMM (AvgF)", lag.max = 20)
+acf(residuals(lme_spline_avgf, type = "normalized"),
+    main = "ACF: Spline + AR(1) (AvgF)", lag.max = 20)
+par(mfrow = c(1, 1))
+
+cat("If the AR(1) model shows reduced autocorrelation in residuals,\n")
+cat("this confirms that the temporal correlation structure is warranted.\n")
 ```
 
 # 3. Machine Learning (XGBoost)
