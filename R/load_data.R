@@ -1,7 +1,6 @@
 .resolve_data_dir <- function(data_dir = NULL) {
   candidates <- unique(c(
     data_dir,
-    file.path("Wushu2", "data"),
     "data",
     file.path("..", "data")
   ))

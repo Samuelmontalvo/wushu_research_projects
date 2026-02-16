@@ -208,7 +208,7 @@ p2 <- df %>%
   guides(color = guide_legend(reverse = FALSE))  # Reverse legend order if needed
 
 p2
-ggsave("mass.png")
+ggsave(file.path("..", "figures", "mass.png"))
 ```
 
 
@@ -580,7 +580,7 @@ ggarrange(p1,nrow = 2,
 
 ```{r, fig.width=10,fig.height=5}
 ggarrange(p1_index,p2_index,ncol = 2)
-ggsave("NSCA_abstract.png")
+ggsave(file.path("..", "figures", "NSCA_abstract.png"))
 ```
 
 
@@ -659,7 +659,7 @@ p4_coef <- plot_model(model4, show.values = TRUE,
 ```{r, fig.height=10, warning=FALSE}
 
 ggarrange(p1_coef,p2_coef,p3_coef,p4_coef, ncol=2,nrow = 2)
-ggsave("inter_coeff.png")
+ggsave(file.path("..", "figures", "inter_coeff.png"))
 ```
 
 
@@ -877,7 +877,7 @@ p_res2 <-  plot(dat, facets = TRUE,
 
 ```{r}
 ggarrange(p_res1,p_res2,nrow = 2,labels = c("A","B"))
-ggsave("index3predicted.png")
+ggsave(file.path("..", "figures", "index3predicted.png"))
 ```
 
 #peak propulsive force
